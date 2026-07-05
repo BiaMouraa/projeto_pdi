@@ -32,6 +32,10 @@ def gerar_banco_gabor(config_gabor):
     """
     Retorna uma lista de kernels de Gabor baseada nas orientações fornecidas[cite: 21, 28].
     """
+    tamanho = config_gabor['tamanho_mascara']
+    if tamanho % 2 == 0:
+        raise ValueError(f"tamanho_mascara deve ser ímpar (ex: 31). Recebido: {tamanho}")
+
     banco = []
     orientacoes = config_gabor['orientacoes_graus']
     

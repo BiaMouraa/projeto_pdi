@@ -1,0 +1,9 @@
+{
+    "nome": "sobel_y",
+    "descricao": "Operador Sobel vertical (derivada em y)",
+    "kernel": [
+        [-1, -2, -1],
+        [0, 0, 0],
+        [1, 2, 1]
+    ]
+}

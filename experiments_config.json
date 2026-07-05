@@ -1,0 +1,15 @@
+{
+    "imagens_dir": "images",
+    "extensoes": [".jpg", ".jpeg", ".png", ".webp"],
+    "config_base": "config.json",
+    "pular_existentes": true,
+    "executar_canny_tradicional": true,
+    "experimento_baseline": true,
+    "experimento_1_lambda": [4, 10, 20],
+    "experimento_1_sigma": [2, 4, 8],
+    "experimento_2_histerese": [
+        {"t_low": 10, "t_high": 30},
+        {"t_low": 20, "t_high": 50},
+        {"t_low": 30, "t_high": 80}
+    ]
+}
