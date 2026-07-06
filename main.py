@@ -1,78 +1,61 @@
-import json
-import cv2
-import numpy as np
-import os
 import argparse
+import json
+import os
 from pathlib import Path
-from moduleB import gerar_banco_gabor
-from moduleC import canny_gabor_di_zenzo, supressao_nao_maximos, histerese, normalizar_imagem
+
+from pipeline import (
+    carregar_imagem_rgb,
+    executar_canny_tradicional,
+    executar_pipeline_modificado,
+    pasta_canny_tradicional,
+    resolver_pasta_destino,
+)
+
 
 def main():
-    # 1. Configuração do parser de argumentos para o terminal
     parser = argparse.ArgumentParser(
-        description="Pipeline de Canny Modificado (Gabor-Di Zenzo) com processamento vetorial."
+        description="Pipeline de Canny Modificado (Gabor-Di Zenzo) + Canny tradicional."
     )
     parser.add_argument(
-        "image_path", 
-        type=str, 
-        help="Caminho para a imagem de teste (ex: GrayAndMagenta.png ou dados/imagem.png)"
+        "image_path",
+        type=str,
+        help="Caminho para a imagem de teste (ex: images/GrayAndMagenta.png)",
+    )
+    parser.add_argument(
+        "--sem-tradicional",
+        action="store_true",
+        help="Não executa o Canny tradicional (apenas o modificado).",
     )
     args = parser.parse_args()
 
-    # 2. Carrega a configuração JSON
     if not os.path.exists('config.json'):
         print("Erro: O arquivo 'config.json' não foi encontrado no diretório atual.")
         return
 
-    with open('config.json', 'r') as f:
+    with open('config.json', 'r', encoding='utf-8') as f:
         config = json.load(f)
 
-    # 3. Carrega a imagem passada como parâmetro
     image_path = args.image_path
-    img_bgr = cv2.imread(image_path) 
-    if img_bgr is None:
-        print(f"Erro: Não foi possível abrir ou encontrar a imagem no caminho: '{image_path}'")
+    try:
+        img_rgb = carregar_imagem_rgb(image_path)
+    except FileNotFoundError as e:
+        print(f"Erro: {e}")
         return
-        
-    # Conversão de BGR (padrão do OpenCV) para RGB em float32 para os cálculos
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
 
-    # 4. Gera o Banco de Filtros de Gabor
-    banco_gabor = gerar_banco_gabor(config['gabor'])
+    nome_imagem = Path(image_path).stem
+    pasta_modificado = resolver_pasta_destino(nome_imagem, config)
 
-    # 5. Execução do Pipeline do Canny Modificado
-    print(f"A processar a imagem: {image_path}")
-    print("-> A executar filtragem espacial e fusão vetorial L2...")
-    magnitude, orientacao = canny_gabor_di_zenzo(img_rgb, banco_gabor)
-    
-    print("-> A aplicar Supressão de Não-Máximos (Afinamento NMS)...")
-    nms = supressao_nao_maximos(magnitude, orientacao)
-    
-    print("-> A aplicar Limiarização por Histerese...")
-    borda_final = histerese(nms, config['histerese']['t_low'], config['histerese']['t_high'])
+    print(f"A processar: {image_path}")
+    executar_pipeline_modificado(img_rgb, config, pasta_modificado)
+    print(f"  Modificado  -> {pasta_modificado}/")
 
-    # 6. Criação automática da estrutura de pastas
-    # Path(image_path).stem extrai apenas o nome do ficheiro, ignorando o caminho e a extensão.
-    # Exemplo: "diretorio/imagens/GrayAndMagenta.png" vira "GrayAndMagenta"
-    nome_imagem_original = Path(image_path).stem
-    
-    # Define o caminho da pasta destino: results/nome_da_imagem_original
-    pasta_destino = os.path.join("results", nome_imagem_original)
-    
-    # Cria a pasta e subpastas caso não existam (o parâmetro exist_ok evita erros se já existir)
-    os.makedirs(pasta_destino, exist_ok=True)
+    if not args.sem_tradicional:
+        pasta_trad = pasta_canny_tradicional(nome_imagem)
+        executar_canny_tradicional(img_rgb, config, pasta_trad)
+        print(f"  Tradicional -> {pasta_trad}/")
 
-    # 7. Definição dos caminhos e gravação das imagens resultantes
-    caminho_mag = os.path.join(pasta_destino, "1_magnitude_normalizada.png")
-    caminho_nms = os.path.join(pasta_destino, "2_nms.png")
-    caminho_borda = os.path.join(pasta_destino, "3_borda_final_histerese.png")
-
-    cv2.imwrite(caminho_mag, normalizar_imagem(magnitude))
-    cv2.imwrite(caminho_nms, normalizar_imagem(nms))
-    cv2.imwrite(caminho_borda, borda_final)
-    
     print("\n[SUCESSO] Processamento concluído!")
-    print(f"Os resultados foram guardados com sucesso na pasta:\n -> {pasta_destino}/")
+
 
 if __name__ == "__main__":
     main()

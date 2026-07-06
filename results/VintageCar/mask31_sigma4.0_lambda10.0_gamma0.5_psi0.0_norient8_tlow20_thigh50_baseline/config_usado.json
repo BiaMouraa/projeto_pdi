@@ -1,0 +1,35 @@
+{
+    "gabor": {
+        "tamanho_mascara": 31,
+        "sigma": 4.0,
+        "lambda_": 10.0,
+        "gamma": 0.5,
+        "psi": 0.0,
+        "orientacoes_graus": [
+            0,
+            22.5,
+            45,
+            67.5,
+            90,
+            112.5,
+            135,
+            157.5
+        ]
+    },
+    "histerese": {
+        "t_low": 20,
+        "t_high": 50
+    },
+    "filtros": {
+        "sobel_x": "filters/sobel_x.json",
+        "sobel_y": "filters/sobel_y.json",
+        "gaussiana": "filters/gaussiana_5x5.json"
+    },
+    "canny_tradicional": {
+        "filtro_sobel_x": "filters/sobel_x.json",
+        "filtro_sobel_y": "filters/sobel_y.json",
+        "filtro_gaussiana": "filters/gaussiana_5x5.json",
+        "t_low": 50,
+        "t_high": 150
+    }
+}

@@ -10,5 +10,17 @@
     "histerese": {
         "t_low": 20,
         "t_high": 50
+    },
+    "filtros": {
+        "sobel_x": "filters/sobel_x.json",
+        "sobel_y": "filters/sobel_y.json",
+        "gaussiana": "filters/gaussiana_5x5.json"
+    },
+    "canny_tradicional": {
+        "filtro_sobel_x": "filters/sobel_x.json",
+        "filtro_sobel_y": "filters/sobel_y.json",
+        "filtro_gaussiana": "filters/gaussiana_5x5.json",
+        "t_low": 50,
+        "t_high": 150
     }
 }
