@@ -3,8 +3,8 @@ import os
 
 import cv2
 
-from moduleB import gerar_banco_gabor
-from moduleC import (
+from projeto1.moduleB import gerar_banco_gabor
+from projeto1.moduleC import (
     canny_gabor_di_zenzo,
     canny_gabor_escalar,
     canny_tradicional,

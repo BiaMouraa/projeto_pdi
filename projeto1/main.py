@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 
-from pipeline import (
+from projeto1.pipeline import (
     carregar_imagem_rgb,
     executar_canny_tradicional,
     executar_pipeline_modificado,

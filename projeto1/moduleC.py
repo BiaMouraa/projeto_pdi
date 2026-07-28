@@ -2,7 +2,7 @@ from collections import deque
 
 import numpy as np
 
-from moduleA import carregar_kernel, correlacao_2d, filtrar_imagem_rgb
+from projeto1.moduleA import carregar_kernel, correlacao_2d, filtrar_imagem_rgb
 
 
 def normalizar_imagem(img):
