@@ -1,0 +1,16 @@
+services:
+  db_vector:
+    image: pgvector/pgvector:pg16 # Imagem oficial otimizada
+    container_name: postgres_iris_cv
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: iris_latente
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata_vector:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata_vector:

@@ -1,3 +1,16 @@
+# Pré-processamento e Manipulação de Imagens
 opencv-python
+kagglehub
 Pillow
 numpy
+
+# Deep Learning e Extração de Características
+torch
+torchvision
+
+# Manipulação de Dados e Visualização de Progresso
+pandas
+tqdm
+
+# Ingestão de Dados no Postgres
+psycopg2-binary
