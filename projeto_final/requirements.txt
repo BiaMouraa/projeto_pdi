@@ -1,3 +1,11 @@
+# Pré-processamento e Manipulação de Imagens
 opencv-python
-Pillow
-numpy
+kagglehub
+
+# Deep Learning e Extração de Características
+torch
+torchvision
+
+# Manipulação de Dados e Visualização de Progresso
+pandas
+tqdm
