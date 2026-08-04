@@ -1,74 +1,69 @@
-import os
 import cv2
 import kagglehub
+import boto3
 from pathlib import Path
 
 # ==========================================
-# 1. Configurações Iniciais
+# Configurações Iniciais
 # ==========================================
+BUCKET_NAME = "iris-cv-latente-data"
+S3_PREFIX = "processed"
 DATASET_URI = "cantonioupao/oxford-flower-17categories-labelled"
-PROCESSED_DIR = "data/processed"
-
 TARGET_SIZE = (256, 256)
 
+# O boto3 assume as permissões da IAM Role da EC2 automaticamente
+s3_client = boto3.client('s3', region_name='us-east-1')
+
 def download_dataset():
-    print("Iniciando o download/leitura do dataset Oxford-17 via Kagglehub...")
+    print("Baixando dataset no cache da EC2 via Kagglehub...")
     path = kagglehub.dataset_download(DATASET_URI)
-    print(f"Download/Leitura concluída! Arquivos brutos localizados em:\n{path}\n")
     return path
 
-def preprocess_images(input_dir, output_dir, target_size):
+def preprocess_and_upload(input_dir, target_size):
     input_path = Path(input_dir)
-    output_path = Path(output_dir)
+    print(f"Iniciando processamento e upload para s3://{BUCKET_NAME}/{S3_PREFIX}/...")
     
-    if not output_path.exists():
-        output_path.mkdir(parents=True)
-
-    print(f"Iniciando pré-processamento. Buscando imagens recursivamente em: {input_path.name}...")
-    
-    # Dicionário para guardar a contagem de imagens por classe
     count_dict = {}
 
-    # O rglob("*.*") entra em TODAS as subpastas automaticamente
     for img_file in input_path.rglob("*.*"):
         if img_file.suffix.lower() not in ['.jpg', '.jpeg', '.png']:
             continue
             
-        # O nome da classe será o nome da pasta imediatamente acima da imagem
         class_name = img_file.parent.name
-        
-        # Ignora se a imagem estiver solta na pasta raiz sem classe
         if class_name == input_path.name:
             continue
             
-        class_output_dir = output_path / class_name
-        class_output_dir.mkdir(exist_ok=True)
-        
         try:
+            # 1. Carrega e trata a imagem
             img = cv2.imread(str(img_file))
-            if img is None:
-                continue
+            if img is None: continue
             
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img_resized = cv2.resize(img_rgb, target_size)
             img_bgr_to_save = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)
             
-            save_path = class_output_dir / img_file.name
-            cv2.imwrite(str(save_path), img_bgr_to_save)
+            # 2. Codifica a imagem em memória (buffer) em vez de salvar no disco
+            _, buffer = cv2.imencode('.jpg', img_bgr_to_save)
             
-            # Atualiza o contador da classe
+            # 3. Define o caminho no S3 (URI) e faz o upload dos bytes
+            s3_key = f"{S3_PREFIX}/{class_name}/{img_file.name}"
+            
+            s3_client.put_object(
+                Bucket=BUCKET_NAME,
+                Key=s3_key,
+                Body=buffer.tobytes(),
+                ContentType='image/jpeg'
+            )
+            
             count_dict[class_name] = count_dict.get(class_name, 0) + 1
             
         except Exception as e:
             print(f"Erro ao processar {img_file.name}: {e}")
 
-    # Exibe o resumo final das classes processadas
-    print("\nResumo do processamento:")
+    print("\nResumo do Upload para o S3:")
     for c_name, c_count in sorted(count_dict.items()):
-        print(f" -> {c_count} imagens processadas na classe '{c_name}'.")
-
-    print(f"\nPré-processamento finalizado! Dataset salvo em: {output_path.absolute()}")
+        print(f" -> {c_count} imagens enviadas para a classe '{c_name}'.")
 
 if __name__ == "__main__":
     raw_dataset_path = download_dataset()
-    preprocess_images(raw_dataset_path, PROCESSED_DIR, TARGET_SIZE)
+    preprocess_and_upload(raw_dataset_path, TARGET_SIZE)

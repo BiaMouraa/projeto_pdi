@@ -1,111 +1,114 @@
-import os
+import boto3
 import torch
 import torch.nn as nn
 import pandas as pd
-from torchvision import models, datasets, transforms
-from torch.utils.data import DataLoader
+from torchvision import models, transforms
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+import io
 from tqdm import tqdm
+import os
 
 # ==========================================
-# 1. Configurações Iniciais
+# Configurações Iniciais
 # ==========================================
-PROCESSED_DIR = "data/processed"
-OUTPUT_FILE = "data/embeddings.csv"
+BUCKET_NAME = "NOME_DO_SEU_BUCKET"
+S3_PREFIX = "processed/"
+OUTPUT_CSV_URI = f"s3://{BUCKET_NAME}/embeddings/embeddings.csv"
 
-# Tamanho do lote (batch) para não estourar a memória (ajuste conforme a máquina)
 BATCH_SIZE = 32 
-
-# Configuração de dispositivo (Usa GPU se disponível)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Executando inferência em: {device}")
+s3_client = boto3.client('s3', region_name='us-east-1')
 
-# ==========================================
-# 2. Pipeline de Transformação (Normalização)
-# ==========================================
-# A MobileNetV2 espera imagens 224x224 e normalizadas pelos padrões do ImageNet
 transform = transforms.Compose([
-    transforms.CenterCrop(224), # Nossas imagens estão 256x256, pegamos o centro
-    transforms.ToTensor(),      # Converte para Tensor (já faz a divisão por 255 internamente)
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                         std=[0.229, 0.224, 0.225])
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
 # ==========================================
-# 3. Carregamento do Modelo (MobileNet V2)
+# Dataset Customizado para Leitura do S3
 # ==========================================
+class S3FlowerDataset(Dataset):
+    def __init__(self, bucket, prefix, transform=None):
+        self.bucket = bucket
+        self.transform = transform
+        self.image_keys = []
+        self.classes = []
+        
+        print("Mapeando arquivos no S3...")
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+        
+        for page in pages:
+            for obj in page.get('Contents', []):
+                key = obj['Key']
+                if key.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    self.image_keys.append(key)
+                    
+                    # Extrai a classe da URI: processed/class_name/file.jpg
+                    class_name = key.split('/')[-2]
+                    if class_name not in self.classes:
+                        self.classes.append(class_name)
+                        
+        self.classes.sort()
+        self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
+        print(f"{len(self.image_keys)} imagens mapeadas em {len(self.classes)} classes.")
+
+    def __len__(self):
+        return len(self.image_keys)
+
+    def __getitem__(self, idx):
+        key = self.image_keys[idx]
+        class_name = key.split('/')[-2]
+        label = self.class_to_idx[class_name]
+        
+        # Lê os bytes diretamente do S3
+        response = s3_client.get_object(Bucket=self.bucket, Key=key)
+        img_bytes = response['Body'].read()
+        
+        img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+        
+        if self.transform:
+            img = self.transform(img)
+            
+        # Retorna tensor, label numérico, nome do arquivo e URI completa
+        return img, label, os.path.basename(key), f"s3://{self.bucket}/{key}"
+
 def get_feature_extractor():
-    """Carrega a MobileNetV2 e remove a camada de classificação final."""
-    # Carrega a rede pré-treinada
     model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
-    
-    # A MobileNetV2 no PyTorch guarda a classificação no bloco 'classifier'.
-    # Substituímos esse bloco inteiro por uma camada de Identidade (pass-through).
-    # Assim, a saída será o vetor de características bruto (1280 dimensões).
     model.classifier = nn.Identity()
-    
     model.to(device)
-    model.eval() # Modo de avaliação (desliga Dropout/BatchNorm updates)
+    model.eval()
     return model
 
-# ==========================================
-# 4. Processamento e Extração
-# ==========================================
 def extract_embeddings():
-    print("Carregando o dataset local...")
-    
-    # O ImageFolder lê a estrutura de pastas e já mapeia o nome da pasta como 'classe'
-    dataset = datasets.ImageFolder(root=PROCESSED_DIR, transform=transform)
+    dataset = S3FlowerDataset(bucket=BUCKET_NAME, prefix=S3_PREFIX, transform=transform)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
     
-    # Mapeamento do índice numérico gerado pelo PyTorch de volta para o nome da classe
     idx_to_class = {v: k for k, v in dataset.class_to_idx.items()}
-    
     model = get_feature_extractor()
-    
     all_embeddings = []
     
-    print("Iniciando extração de embeddings no espaço latente...")
-    # Desativa cálculo de gradientes (economiza MUITA memória)
     with torch.no_grad():
-        for inputs, labels in tqdm(dataloader, desc="Processando Batches"):
+        for inputs, labels, file_names, uris in tqdm(dataloader, desc="Extraindo Batch S3"):
             inputs = inputs.to(device)
-            
-            # Passa pela rede
-            features = model(inputs)
-            
-            # Move os vetores de volta para a CPU e converte para NumPy
-            features = features.cpu().numpy()
+            features = model(inputs).cpu().numpy()
             
             for i in range(len(features)):
-                # Recuperar o caminho original do arquivo (para usar como ID/URI)
-                # dataloader.dataset.samples guarda uma tupla (caminho_arquivo, label_idx)
-                # Como não demos shuffle, a ordem sequencial é mantida
-                global_idx = len(all_embeddings)
-                file_path, _ = dataset.samples[global_idx]
-                file_name = os.path.basename(file_path)
-                
-                # Estruturação voltada para inserção no banco relacional
                 all_embeddings.append({
-                    "image_id": file_name,
+                    "image_id": file_names[i],
                     "class_name": idx_to_class[labels[i].item()],
-                    # Salva o array como lista para facilitar a conversão em string array no SQL
-                    "embedding": features[i].tolist(), 
-                    "file_path": file_path
+                    "embedding": str(features[i].tolist()),
+                    "file_path": uris[i]
                 })
                 
-    # ==========================================
-    # 5. Salvamento para Ingestão no BD
-    # ==========================================
-    print("\nSalvando embeddings para arquivo estruturado...")
+    print("\nSalvando embeddings estruturados no S3...")
     df = pd.DataFrame(all_embeddings)
     
-    # Converte a lista do embedding para string no formato "[v1, v2, ...]" esperado pelo pgvector
-    df['embedding'] = df['embedding'].apply(lambda x: str(x))
-    
-    df.to_csv(OUTPUT_FILE, index=False)
-    print(f"Concluído! Dados salvos em {OUTPUT_FILE}")
-    print(f"Total de imagens processadas: {len(df)}")
-    print(f"Dimensão do espaço latente: {len(eval(df['embedding'].iloc[0]))}")
+    # O Pandas, com a biblioteca s3fs, escreve direto no bucket
+    df.to_csv(OUTPUT_CSV_URI, index=False)
+    print(f"Extração concluída! Dados salvos em {OUTPUT_CSV_URI}")
 
 if __name__ == "__main__":
     extract_embeddings()
