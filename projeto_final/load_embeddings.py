@@ -1,17 +1,11 @@
+import argparse
+from pathlib import Path
+
 import pandas as pd
 import psycopg2
 from tqdm import tqdm
 
-DB_CONFIG = {
-    "dbname": "iris_latente",
-    "user": "admin",
-    "password": "adminpassword",
-    "host": "localhost",
-    "port": "5432"
-}
-
-# A URI gerada pela fase de extração no S3
-CSV_S3_URI = "s3://iris-cv-latente-data/embeddings/embeddings.csv"
+from pipeline_config import DB_CONFIG, LOCAL_EMBEDDINGS_CSV, embeddings_csv_source, is_aws_mode
 
 SQL_SETUP = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -26,46 +20,96 @@ CREATE TABLE flower_embeddings (
 );
 """
 
-SQL_INDEX = "CREATE INDEX ON flower_embeddings USING hnsw (embedding vector_cosine_ops);"
-SQL_INSERT = "INSERT INTO flower_embeddings (image_id, class_name, file_path, embedding) VALUES (%s, %s, %s, %s)"
+SQL_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS flower_embeddings_embedding_cosine_idx ON flower_embeddings USING hnsw (embedding vector_cosine_ops);",
+    "CREATE INDEX IF NOT EXISTS flower_embeddings_embedding_l2_idx ON flower_embeddings USING hnsw (embedding vector_l2_ops);",
+]
+SQL_INSERT = (
+    "INSERT INTO flower_embeddings (image_id, class_name, file_path, embedding) "
+    "VALUES (%s, %s, %s, %s)"
+)
 
-def carregar_dados_no_banco():
-    print(f"Lendo dados diretamente do S3: {CSV_S3_URI}...")
-    # Novamente, o s3fs trabalha em background para carregar os dados
-    df = pd.read_csv(CSV_S3_URI)
-    
-    print("Conectando ao PostgreSQL via Docker...")
+
+def read_embeddings_csv(csv_path):
+    path = Path(csv_path)
+    if path.is_file():
+        print(f"Lendo CSV local: {path.resolve()}")
+        return pd.read_csv(path)
+
+    if str(csv_path).startswith("s3://"):
+        print(f"Lendo CSV do S3: {csv_path}")
+        return pd.read_csv(csv_path)
+
+    raise FileNotFoundError(
+        f"CSV nao encontrado: {csv_path}. "
+        "Rode extractor.py --mode local ou informe --csv."
+    )
+
+
+def carregar_dados_no_banco(csv_path):
+    df = read_embeddings_csv(csv_path)
+
+    print("Conectando ao PostgreSQL...")
     conn = psycopg2.connect(**DB_CONFIG)
     cursor = conn.cursor()
 
     try:
         print("Configurando esquema e tabela...")
         cursor.execute(SQL_SETUP)
-        
-        print("Iniciando ingestão de registros no BD...")
-        # Uso do bloco transacional
+
+        print("Iniciando ingestao de registros no BD...")
         for _, row in tqdm(df.iterrows(), total=len(df)):
-            cursor.execute(SQL_INSERT, (
-                row['image_id'],
-                row['class_name'],
-                row['file_path'],  # Agora armazena a URI completa do S3
-                row['embedding']
-            ))
-            
-        conn.commit()
-        print("Processo de inserção finalizado!")
+            cursor.execute(
+                SQL_INSERT,
+                (
+                    row["image_id"],
+                    row["class_name"],
+                    row["file_path"],
+                    row["embedding"],
+                ),
+            )
 
-        print("Construindo índice vetorial HNSW...")
-        cursor.execute(SQL_INDEX)
         conn.commit()
-        print("Infraestrutura de dados completa e otimizada.")
+        print("Processo de insercao finalizado!")
 
-    except Exception as e:
-        print(f"ROLLBACK. Ocorreu um erro na ingestão de dados: {e}")
+        print("Construindo indices vetoriais HNSW...")
+        for sql_index in SQL_INDEXES:
+            cursor.execute(sql_index)
+        conn.commit()
+        print("Infraestrutura pronta (cosseno + euclidiana).")
+
+    except Exception as exc:
+        print(f"ROLLBACK. Erro na ingestao: {exc}")
         conn.rollback()
+        raise
     finally:
         cursor.close()
         conn.close()
 
+
+def parse_args():
+    default_csv = embeddings_csv_source()
+    parser = argparse.ArgumentParser(description="Ingestao de embeddings no PostgreSQL.")
+    parser.add_argument(
+        "--csv",
+        default=default_csv,
+        help=f"CSV de embeddings (padrao: {default_csv}).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("local", "aws"),
+        default="local" if not is_aws_mode() else "aws",
+        help="Atalho para escolher origem padrao do CSV.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    carregar_dados_no_banco()
+    args = parse_args()
+    csv_path = args.csv
+    if args.mode == "local" and args.csv == embeddings_csv_source():
+        csv_path = str(LOCAL_EMBEDDINGS_CSV)
+    elif args.mode == "aws" and args.csv == embeddings_csv_source():
+        csv_path = embeddings_csv_source()
+
+    carregar_dados_no_banco(csv_path)

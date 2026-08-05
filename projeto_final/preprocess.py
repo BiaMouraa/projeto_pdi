@@ -1,69 +1,118 @@
+import argparse
 import cv2
 import kagglehub
-import boto3
 from pathlib import Path
 
-# ==========================================
-# Configurações Iniciais
-# ==========================================
-BUCKET_NAME = "iris-cv-latente-data"
-S3_PREFIX = "processed"
-DATASET_URI = "cantonioupao/oxford-flower-17categories-labelled"
-TARGET_SIZE = (256, 256)
+from pipeline_config import (
+    BUCKET_NAME,
+    DATASET_URI,
+    LOCAL_PROCESSED_DIR,
+    S3_PREFIX,
+    TARGET_SIZE,
+    is_aws_mode,
+)
 
-# O boto3 assume as permissões da IAM Role da EC2 automaticamente
-s3_client = boto3.client('s3', region_name='us-east-1')
 
 def download_dataset():
-    print("Baixando dataset no cache da EC2 via Kagglehub...")
-    path = kagglehub.dataset_download(DATASET_URI)
-    return path
+    print("Baixando dataset via Kagglehub...")
+    return kagglehub.dataset_download(DATASET_URI)
 
-def preprocess_and_upload(input_dir, target_size):
+
+def preprocess_to_disk(input_dir, output_dir, target_size):
     input_path = Path(input_dir)
-    print(f"Iniciando processamento e upload para s3://{BUCKET_NAME}/{S3_PREFIX}/...")
-    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    print(f"Salvando imagens processadas em {output_path.resolve()}...")
     count_dict = {}
 
     for img_file in input_path.rglob("*.*"):
-        if img_file.suffix.lower() not in ['.jpg', '.jpeg', '.png']:
+        if img_file.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
             continue
-            
+
         class_name = img_file.parent.name
         if class_name == input_path.name:
             continue
-            
+
         try:
-            # 1. Carrega e trata a imagem
             img = cv2.imread(str(img_file))
-            if img is None: continue
-            
+            if img is None:
+                continue
+
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img_resized = cv2.resize(img_rgb, target_size)
             img_bgr_to_save = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)
-            
-            # 2. Codifica a imagem em memória (buffer) em vez de salvar no disco
-            _, buffer = cv2.imencode('.jpg', img_bgr_to_save)
-            
-            # 3. Define o caminho no S3 (URI) e faz o upload dos bytes
+
+            class_dir = output_path / class_name
+            class_dir.mkdir(parents=True, exist_ok=True)
+            out_file = class_dir / img_file.name
+            cv2.imwrite(str(out_file), img_bgr_to_save)
+            count_dict[class_name] = count_dict.get(class_name, 0) + 1
+        except Exception as exc:
+            print(f"Erro ao processar {img_file.name}: {exc}")
+
+    print("\nResumo do preprocessamento local:")
+    for class_name, count in sorted(count_dict.items()):
+        print(f" -> {count} imagens na classe '{class_name}'.")
+
+
+def preprocess_and_upload(input_dir, target_size):
+    import boto3
+
+    s3_client = boto3.client("s3", region_name="us-east-1")
+    input_path = Path(input_dir)
+    print(f"Enviando para s3://{BUCKET_NAME}/{S3_PREFIX}/...")
+    count_dict = {}
+
+    for img_file in input_path.rglob("*.*"):
+        if img_file.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
+            continue
+
+        class_name = img_file.parent.name
+        if class_name == input_path.name:
+            continue
+
+        try:
+            img = cv2.imread(str(img_file))
+            if img is None:
+                continue
+
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img_resized = cv2.resize(img_rgb, target_size)
+            img_bgr_to_save = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)
+            _, buffer = cv2.imencode(".jpg", img_bgr_to_save)
+
             s3_key = f"{S3_PREFIX}/{class_name}/{img_file.name}"
-            
             s3_client.put_object(
                 Bucket=BUCKET_NAME,
                 Key=s3_key,
                 Body=buffer.tobytes(),
-                ContentType='image/jpeg'
+                ContentType="image/jpeg",
             )
-            
             count_dict[class_name] = count_dict.get(class_name, 0) + 1
-            
-        except Exception as e:
-            print(f"Erro ao processar {img_file.name}: {e}")
+        except Exception as exc:
+            print(f"Erro ao processar {img_file.name}: {exc}")
 
-    print("\nResumo do Upload para o S3:")
-    for c_name, c_count in sorted(count_dict.items()):
-        print(f" -> {c_count} imagens enviadas para a classe '{c_name}'.")
+    print("\nResumo do upload para o S3:")
+    for class_name, count in sorted(count_dict.items()):
+        print(f" -> {count} imagens enviadas para a classe '{class_name}'.")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Preprocessamento Oxford Flower 17.")
+    parser.add_argument(
+        "--mode",
+        choices=("local", "aws"),
+        default="local" if not is_aws_mode() else "aws",
+        help="local: grava em data/processed | aws: upload S3 (EC2).",
+    )
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
+    args = parse_args()
     raw_dataset_path = download_dataset()
-    preprocess_and_upload(raw_dataset_path, TARGET_SIZE)
+
+    if args.mode == "local":
+        preprocess_to_disk(raw_dataset_path, LOCAL_PROCESSED_DIR, TARGET_SIZE)
+    else:
+        preprocess_and_upload(raw_dataset_path, TARGET_SIZE)

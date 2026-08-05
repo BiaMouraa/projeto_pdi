@@ -18,7 +18,7 @@ O arquivo está organizado em partes principais:
 2. definições das queries SQL;
 3. leitura do CSV de embeddings;
 4. inserção dos dados no banco;
-5. criação do índice vetorial.
+5. criação dos índices vetoriais.
 
 ---
 
@@ -65,16 +65,19 @@ Em seguida, percorre cada linha com `tqdm` para exibir uma barra de progresso e 
 
 Dessa forma, cada embedding fica armazenado como um vetor nativo do PostgreSQL.
 
-### 3.5 Criação de índice vetorial
+### 3.5 Criação de índices vetoriais
 
-Após a ingestão, o script cria um índice HNSW com a query `SQL_INDEX`:
+Após a ingestão, o script cria dois índices HNSW:
 
 ```sql
-CREATE INDEX ON flower_embeddings 
-USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS flower_embeddings_embedding_cosine_idx
+ON flower_embeddings USING hnsw (embedding vector_cosine_ops);
+
+CREATE INDEX IF NOT EXISTS flower_embeddings_embedding_l2_idx
+ON flower_embeddings USING hnsw (embedding vector_l2_ops);
 ```
 
-Esse índice acelera buscas por similaridade, usando distância de cosseno entre vetores.
+Esses índices aceleram buscas por similaridade tanto em distância de cosseno quanto em distância euclidiana.
 
 ---
 
@@ -117,7 +120,7 @@ Ele permite consultas rápidas em espaços de alta dimensão, como embeddings de
 
 A extensão `pgvector` adiciona suporte para vetores ao PostgreSQL e fornece operadores e índices voltados a similaridade.
 
-No script, ela é usada tanto no tipo de coluna (`VECTOR`) quanto no índice (`vector_cosine_ops`).
+No script, ela é usada tanto no tipo de coluna (`VECTOR`) quanto nos índices (`vector_cosine_ops` e `vector_l2_ops`).
 
 ---
 
@@ -140,6 +143,6 @@ O script realiza o seguinte:
 2. prepara a tabela e habilita a extensão `pgvector`;
 3. lê o CSV de embeddings;
 4. insere cada registro na tabela;
-5. cria um índice HNSW para buscas rápidas.
+5. cria índices HNSW para buscas rápidas com cosseno e euclidiana.
 
 Com isso, os embeddings passam a estar acessíveis para aplicações que buscam imagens semelhantes ou realizam análise de similaridade no banco de dados.

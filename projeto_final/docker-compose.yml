@@ -7,7 +7,8 @@ services:
       POSTGRES_PASSWORD: adminpassword
       POSTGRES_DB: iris_latente
     ports:
-      - "5432:5432"
+      # 5433 no host evita conflito com outro Postgres local (ex.: pega_db na 5432)
+      - "5433:5432"
     volumes:
       - pgdata_vector:/var/lib/postgresql/data
     restart: unless-stopped
