@@ -5,3 +5,7 @@ data/
 *.jpeg
 *.png
 local_data/
+
+# Manter os graficos/montagens da Issue 5 versionados (deliverable)
+!docs/issue5_assets/
+!docs/issue5_assets/**
