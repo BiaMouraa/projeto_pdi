@@ -1,12 +1,9 @@
 import argparse
 import datetime as dt
 import statistics
-import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlparse
 
-import boto3
 import psycopg2
 from botocore.exceptions import ClientError, NoCredentialsError
 import torch
@@ -14,8 +11,14 @@ import torch.nn as nn
 from PIL import Image
 from torchvision import models, transforms
 
-
 from pipeline_config import DB_CONFIG as DEFAULT_DB_CONFIG
+from pipeline_config import (
+    AWS_IMAGE_BUCKET,
+    download_image_to_temp,
+    is_aws_mode,
+    normalize_image_s3_uri,
+    parse_s3_uri,
+)
 
 OPERATOR_BY_METRIC = {
     "euclidiana": "<->",
@@ -41,7 +44,10 @@ def parse_args():
     image_group = parser.add_mutually_exclusive_group(required=False)
     image_group.add_argument(
         "--image",
-        help="Caminho local ou URI s3://bucket/chave da imagem de teste.",
+        help=(
+            "Caminho local ou URI s3://... da imagem de teste. "
+            f"Em PIPELINE_MODE=aws, URIs sao resolvidas em s3://{AWS_IMAGE_BUCKET}/."
+        ),
     )
     image_group.add_argument(
         "--image-id",
@@ -57,7 +63,7 @@ def parse_args():
         default="local_data",
         help=(
             "Pasta local que espelha as chaves S3 (ex.: local_data/processed/rose/foto.jpg). "
-            "Usada antes de baixar do S3."
+            "Usada antes de baixar do S3 (ignorada se PIPELINE_MODE=aws)."
         ),
     )
     parser.add_argument(
@@ -129,47 +135,48 @@ def list_db_samples(db_config, limit=10):
             return cursor.fetchall()
 
 
-def s3_object_key(s3_uri):
-    return urlparse(s3_uri).path.lstrip("/")
-
-
 def local_mirror_for_s3(s3_uri, local_data_root):
+    _bucket, key = parse_s3_uri(s3_uri)
     root = Path(local_data_root).expanduser().resolve()
-    return root / s3_object_key(s3_uri)
-
-
-def download_s3_to_temp(s3_uri):
-    parsed = urlparse(s3_uri)
-    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
-        raise ValueError(f"URI S3 invalida: {s3_uri}")
-    bucket = parsed.netloc
-    key = parsed.path.lstrip("/")
-    client = boto3.client("s3")
-    try:
-        response = client.get_object(Bucket=bucket, Key=key)
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
-        if code in {"404", "NoSuchKey", "NotFound"}:
-            raise FileNotFoundError(
-                f"Objeto nao encontrado no S3: {s3_uri}"
-            ) from exc
-        raise
-    suffix = Path(key).suffix or ".jpg"
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    tmp.write(response["Body"].read())
-    tmp.close()
-    return Path(tmp.name)
+    return root / key
 
 
 def resolve_image_path(image_arg, local_data_root):
     if image_arg.startswith("s3://"):
-        mirror = local_mirror_for_s3(image_arg, local_data_root)
+        # Modo aws: sempre resolve no bucket oficial iris-cv-latente-data.
+        uri = normalize_image_s3_uri(image_arg) if is_aws_mode() else image_arg
+        if is_aws_mode():
+            try:
+                temp_path = download_image_to_temp(uri)
+                return temp_path, uri, True
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code in {"404", "NoSuchKey", "NotFound"}:
+                    raise FileNotFoundError(
+                        f"Objeto nao encontrado no S3: {uri}"
+                    ) from exc
+                raise
+            except NoCredentialsError as exc:
+                raise RuntimeError(
+                    "Credenciais AWS nao configuradas (NoCredentialsError).\n"
+                    f"PIPELINE_MODE=aws exige acesso ao bucket {AWS_IMAGE_BUCKET}.\n"
+                    f"URI tentada: {uri}"
+                ) from exc
+
+        mirror = local_mirror_for_s3(uri, local_data_root)
         if mirror.is_file():
-            return mirror, image_arg, False
+            return mirror, uri, False
 
         try:
-            temp_path = download_s3_to_temp(image_arg)
-            return temp_path, image_arg, True
+            temp_path = download_image_to_temp(uri)
+            return temp_path, uri, True
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                raise FileNotFoundError(
+                    f"Objeto nao encontrado no S3: {uri}"
+                ) from exc
+            raise
         except NoCredentialsError as exc:
             raise RuntimeError(
                 "Credenciais AWS nao configuradas (NoCredentialsError).\n"
@@ -177,17 +184,23 @@ def resolve_image_path(image_arg, local_data_root):
                 f"  1) Copie a imagem para o espelho local: {mirror}\n"
                 f"  2) Use --image com caminho absoluto de um .jpg no disco\n"
                 f"  3) Configure AWS (aws configure ou variaveis AWS_ACCESS_KEY_ID/SECRET)\n"
-                f"URI tentada: {image_arg}"
+                f"URI tentada: {uri}"
             ) from exc
 
     path = Path(image_arg).expanduser()
     if not path.is_absolute():
         path = (Path.cwd() / path).resolve()
     if not path.is_file():
-        hint = (
-            "Imagens do pipeline ficam no S3; sem AWS, use --image com um .jpg local "
-            f"ou espelhe a chave S3 em --local-data-root (padrao: {local_data_root!r})."
-        )
+        if is_aws_mode():
+            hint = (
+                f"Em PIPELINE_MODE=aws as imagens ficam em s3://{AWS_IMAGE_BUCKET}/. "
+                "Use --image s3://... ou --image-id."
+            )
+        else:
+            hint = (
+                "Imagens do pipeline ficam no S3; sem AWS, use --image com um .jpg local "
+                f"ou espelhe a chave S3 em --local-data-root (padrao: {local_data_root!r})."
+            )
         raise FileNotFoundError(f"Imagem nao encontrada: {path}\n{hint}")
     return path, str(path), False
 
@@ -382,7 +395,10 @@ def main():
         if not rows:
             print("Nenhum registro em flower_embeddings. Rode load_embeddings.py antes.")
             return
-        print("Amostras em flower_embeddings (use --image-id ou espelhe file_path em local_data/):")
+        print(
+            "Amostras em flower_embeddings "
+            f"(use --image-id; em aws as imagens estao em s3://{AWS_IMAGE_BUCKET}/):"
+        )
         for image_id, class_name, file_path in rows:
             print(f"  {image_id}\t{class_name}\t{file_path}")
         return

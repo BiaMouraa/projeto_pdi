@@ -28,6 +28,7 @@ import numpy as np
 import psycopg2
 
 from pipeline_config import DB_CONFIG as DEFAULT_DB_CONFIG
+from pipeline_config import download_image_bytes, is_aws_mode, normalize_image_s3_uri
 
 OPERATOR_BY_METRIC = {
     "euclidiana": "<->",
@@ -293,10 +294,14 @@ def plot_confusion(normalized, classes, output_path, k):
 
 def _load_image_safe(path_str, size=(160, 160)):
     from PIL import Image
+    import io
 
     try:
         if path_str.startswith("s3://"):
-            return None
+            uri = normalize_image_s3_uri(path_str) if is_aws_mode() else path_str
+            data, _ = download_image_bytes(uri)
+            img = Image.open(io.BytesIO(data)).convert("RGB").resize(size)
+            return img
         p = Path(path_str)
         if not p.is_file():
             return None
@@ -430,7 +435,7 @@ def write_report(path, context):
             a(f"![Exemplo de recuperacao]({rel})")
             a("")
     else:
-        a("Sem montagens (imagens locais indisponiveis; execute em modo local com data/processed).")
+        a("Sem montagens (imagens indisponiveis localmente ou em s3://iris-cv-latente-data).")
         a("")
 
     a("## 6. Consolidacao para Resultados e Discussao")

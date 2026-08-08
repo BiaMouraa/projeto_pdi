@@ -1,4 +1,5 @@
 import argparse
+import io
 import os
 from pathlib import Path
 
@@ -6,17 +7,20 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from PIL import Image
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, models, transforms
 from tqdm import tqdm
 
 from pipeline_config import (
-    BUCKET_NAME,
     LOCAL_EMBEDDINGS_CSV,
     LOCAL_PROCESSED_DIR,
     S3_PREFIX,
-    embeddings_csv_source,
+    download_image_bytes,
+    get_s3_client,
+    image_bucket,
+    image_s3_uri,
     is_aws_mode,
+    list_image_keys,
 )
 
 BATCH_SIZE = 32
@@ -82,32 +86,19 @@ def extract_embeddings_local(processed_dir, output_csv):
 
 
 def extract_embeddings_aws():
-    import boto3
-    import io
-    from torch.utils.data import Dataset
-
-    s3_client = boto3.client("s3", region_name="us-east-1")
+    """Le imagens do bucket iris-cv-latente-data e grava CSV no mesmo bucket."""
+    s3_client = get_s3_client()
     prefix = f"{S3_PREFIX.rstrip('/')}/"
-    output_uri = embeddings_csv_source()
+    output_uri = f"s3://{image_bucket()}/embeddings/embeddings.csv"
+    bucket = image_bucket()
 
     class S3FlowerDataset(Dataset):
-        def __init__(self, bucket, s3_prefix, image_transform=None):
-            self.bucket = bucket
+        def __init__(self, s3_prefix, image_transform=None):
             self.transform = image_transform
-            self.image_keys = []
-            self.classes = []
-
-            paginator = s3_client.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=bucket, Prefix=s3_prefix):
-                for obj in page.get("Contents", []):
-                    key = obj["Key"]
-                    if key.lower().endswith((".jpg", ".jpeg", ".png")):
-                        self.image_keys.append(key)
-                        class_name = key.split("/")[-2]
-                        if class_name not in self.classes:
-                            self.classes.append(class_name)
-
-            self.classes.sort()
+            self.image_keys = list_image_keys(prefix=s3_prefix, s3=s3_client)
+            self.classes = sorted(
+                {key.split("/")[-2] for key in self.image_keys if "/" in key}
+            )
             self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
 
         def __len__(self):
@@ -117,20 +108,29 @@ def extract_embeddings_aws():
             key = self.image_keys[idx]
             class_name = key.split("/")[-2]
             label = self.class_to_idx[class_name]
-            response = s3_client.get_object(Bucket=self.bucket, Key=key)
-            img = Image.open(io.BytesIO(response["Body"].read())).convert("RGB")
+            data, _ = download_image_bytes(key, s3=s3_client)
+            img = Image.open(io.BytesIO(data)).convert("RGB")
             if self.transform:
                 img = self.transform(img)
-            return img, label, os.path.basename(key), f"s3://{self.bucket}/{key}"
+            return img, label, os.path.basename(key), image_s3_uri(key)
 
-    dataset = S3FlowerDataset(BUCKET_NAME, prefix, transform)
+    print(f"Lendo imagens de s3://{bucket}/{prefix}")
+    dataset = S3FlowerDataset(prefix, transform)
+    if len(dataset) == 0:
+        raise FileNotFoundError(
+            f"Nenhuma imagem em s3://{bucket}/{prefix}. "
+            "Rode: python preprocess.py --mode aws"
+        )
+
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
     idx_to_class = {idx: name for name, idx in dataset.class_to_idx.items()}
     model = get_feature_extractor()
     all_embeddings = []
 
     with torch.no_grad():
-        for inputs, labels, file_names, uris in tqdm(dataloader, desc="Extraindo embeddings (S3)"):
+        for inputs, labels, file_names, uris in tqdm(
+            dataloader, desc=f"Extraindo embeddings (s3://{bucket})"
+        ):
             inputs = inputs.to(device)
             features = model(inputs).cpu().numpy()
             for i in range(len(features)):
@@ -153,7 +153,10 @@ def parse_args():
         "--mode",
         choices=("local", "aws"),
         default="local" if not is_aws_mode() else "aws",
-        help="local: data/processed -> data/embeddings.csv | aws: S3 -> S3.",
+        help=(
+            "local: data/processed -> data/embeddings.csv | "
+            "aws: iris-cv-latente-data -> S3."
+        ),
     )
     parser.add_argument(
         "--processed-dir",

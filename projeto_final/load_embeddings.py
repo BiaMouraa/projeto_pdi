@@ -5,7 +5,13 @@ import pandas as pd
 import psycopg2
 from tqdm import tqdm
 
-from pipeline_config import DB_CONFIG, LOCAL_EMBEDDINGS_CSV, embeddings_csv_source, is_aws_mode
+from pipeline_config import (
+    DB_CONFIG,
+    LOCAL_EMBEDDINGS_CSV,
+    embeddings_csv_source,
+    image_bucket,
+    is_aws_mode,
+)
 
 SQL_SETUP = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -99,17 +105,22 @@ def parse_args():
         "--mode",
         choices=("local", "aws"),
         default="local" if not is_aws_mode() else "aws",
-        help="Atalho para escolher origem padrao do CSV.",
+        help=(
+            "Atalho para origem do CSV. "
+            f"aws: s3://{image_bucket()}/embeddings/embeddings.csv"
+        ),
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    csv_path = args.csv
-    if args.mode == "local" and args.csv == embeddings_csv_source():
-        csv_path = str(LOCAL_EMBEDDINGS_CSV)
-    elif args.mode == "aws" and args.csv == embeddings_csv_source():
-        csv_path = embeddings_csv_source()
+    default_local = str(LOCAL_EMBEDDINGS_CSV)
+    default_aws = f"s3://{image_bucket()}/embeddings/embeddings.csv"
+
+    if args.csv in {embeddings_csv_source(), default_local, default_aws}:
+        csv_path = default_local if args.mode == "local" else default_aws
+    else:
+        csv_path = args.csv
 
     carregar_dados_no_banco(csv_path)

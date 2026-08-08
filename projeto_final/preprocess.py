@@ -4,12 +4,15 @@ import kagglehub
 from pathlib import Path
 
 from pipeline_config import (
-    BUCKET_NAME,
-    DATASET_URI,
     LOCAL_PROCESSED_DIR,
-    S3_PREFIX,
     TARGET_SIZE,
+    DATASET_URI,
+    S3_PREFIX,
+    image_bucket,
     is_aws_mode,
+    processed_image_key,
+    upload_image_bytes,
+    get_s3_client,
 )
 
 
@@ -56,11 +59,11 @@ def preprocess_to_disk(input_dir, output_dir, target_size):
 
 
 def preprocess_and_upload(input_dir, target_size):
-    import boto3
-
-    s3_client = boto3.client("s3", region_name="us-east-1")
+    """Preprocessa e grava todas as imagens no bucket iris-cv-latente-data."""
+    s3_client = get_s3_client()
     input_path = Path(input_dir)
-    print(f"Enviando para s3://{BUCKET_NAME}/{S3_PREFIX}/...")
+    bucket = image_bucket()
+    print(f"Enviando imagens para s3://{bucket}/{S3_PREFIX}/...")
     count_dict = {}
 
     for img_file in input_path.rglob("*.*"):
@@ -81,18 +84,18 @@ def preprocess_and_upload(input_dir, target_size):
             img_bgr_to_save = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)
             _, buffer = cv2.imencode(".jpg", img_bgr_to_save)
 
-            s3_key = f"{S3_PREFIX}/{class_name}/{img_file.name}"
-            s3_client.put_object(
-                Bucket=BUCKET_NAME,
-                Key=s3_key,
-                Body=buffer.tobytes(),
-                ContentType="image/jpeg",
+            s3_key = processed_image_key(class_name, img_file.name)
+            upload_image_bytes(
+                s3_key,
+                buffer.tobytes(),
+                content_type="image/jpeg",
+                s3=s3_client,
             )
             count_dict[class_name] = count_dict.get(class_name, 0) + 1
         except Exception as exc:
             print(f"Erro ao processar {img_file.name}: {exc}")
 
-    print("\nResumo do upload para o S3:")
+    print(f"\nResumo do upload para s3://{bucket}/{S3_PREFIX}/:")
     for class_name, count in sorted(count_dict.items()):
         print(f" -> {count} imagens enviadas para a classe '{class_name}'.")
 
@@ -103,7 +106,10 @@ def parse_args():
         "--mode",
         choices=("local", "aws"),
         default="local" if not is_aws_mode() else "aws",
-        help="local: grava em data/processed | aws: upload S3 (EC2).",
+        help=(
+            "local: grava em data/processed | "
+            "aws: upload no bucket iris-cv-latente-data."
+        ),
     )
     return parser.parse_args()
 
