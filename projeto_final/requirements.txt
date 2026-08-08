@@ -1,5 +1,6 @@
 # Pré-processamento e Manipulação de Imagens
-opencv-python
+# headless: evita dependencia de libGL.so.1 em EC2/servidores sem GUI
+opencv-python-headless
 kagglehub
 Pillow
 numpy

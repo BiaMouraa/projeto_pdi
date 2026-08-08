@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
-# Pipeline offline (Mac). Execute: bash run_offline_pipeline.sh
+# Pipeline offline (Mac). Execute: bash run_offline_pipeline.sh [oxford17|oxford102]
 # Rode UM bloco por vez se preferir; nao cole comentarios (#) na mesma linha dos comandos.
 
 set -euo pipefail
 cd "$(dirname "$0")"
+
+DATASET="${1:-oxford17}"
+case "${DATASET}" in
+  oxford17) SLUG="oxford-flower-17" ;;
+  oxford102) SLUG="oxford-flower-102" ;;
+  *)
+    echo "Uso: bash run_offline_pipeline.sh [oxford17|oxford102]"
+    exit 1
+    ;;
+esac
 
 if [[ -d .venv ]]; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
 fi
 
+echo "==> Dataset: ${DATASET} (slug=${SLUG})"
+
 echo "==> 1/5 preprocess (modo local)"
-python preprocess.py --mode local
+python preprocess.py --mode local --dataset "${DATASET}"
 
 echo "==> 2/5 extractor"
-python extractor.py --mode local
+python extractor.py --mode local --dataset "${DATASET}"
 
 echo "==> 3/5 Postgres (Docker)"
 if ! docker info >/dev/null 2>&1; then
@@ -27,19 +39,20 @@ echo "Aguardando Postgres..."
 sleep 5
 
 echo "==> 4/5 load_embeddings"
-python load_embeddings.py --mode local
+python load_embeddings.py --mode local --dataset "${DATASET}"
 
 echo "==> 5/5 Issue 4 (semantic search)"
-SAMPLE="$(find data/processed -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | head -n 1)"
+SAMPLE="$(find "data/${SLUG}/processed" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | head -n 1)"
 if [[ -z "${SAMPLE}" ]]; then
-  echo "ERRO: nenhuma imagem em data/processed"
+  echo "ERRO: nenhuma imagem em data/${SLUG}/processed"
   exit 1
 fi
 CLASS="$(basename "$(dirname "${SAMPLE}")")"
 echo "Imagem de teste: ${SAMPLE} (classe: ${CLASS})"
 
-python semantic_search_eval.py --list-db-samples
+python semantic_search_eval.py --dataset "${DATASET}" --list-db-samples
 python semantic_search_eval.py \
+  --dataset "${DATASET}" \
   --image "${SAMPLE}" \
   --query-class "${CLASS}" \
   --top-k 5 10 \

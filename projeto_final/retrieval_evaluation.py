@@ -28,6 +28,15 @@ import numpy as np
 import psycopg2
 
 from pipeline_config import DB_CONFIG as DEFAULT_DB_CONFIG
+from pipeline_config import (
+    ALLOWED_TABLES,
+    add_dataset_argument,
+    download_image_bytes,
+    is_aws_mode,
+    normalize_image_s3_uri,
+    resolve_dataset,
+    upload_report_artifacts,
+)
 
 OPERATOR_BY_METRIC = {
     "euclidiana": "<->",
@@ -45,6 +54,7 @@ def parse_args():
             "graficos de desempenho para a busca semantica Top-K."
         )
     )
+    add_dataset_argument(parser)
     parser.add_argument(
         "--metric",
         choices=tuple(OPERATOR_BY_METRIC.keys()),
@@ -100,19 +110,30 @@ def parse_args():
 # ==========================================
 # Acesso ao banco
 # ==========================================
-def get_class_counts(conn):
-    sql = "SELECT class_name, COUNT(*) FROM flower_embeddings GROUP BY class_name ORDER BY class_name;"
+def assert_safe_table(table_name):
+    if table_name not in ALLOWED_TABLES:
+        raise ValueError(f"Tabela nao permitida: {table_name!r}")
+    return table_name
+
+
+def get_class_counts(conn, table_name):
+    table = assert_safe_table(table_name)
+    sql = (
+        f"SELECT class_name, COUNT(*) FROM {table} "
+        "GROUP BY class_name ORDER BY class_name;"
+    )
     with conn.cursor() as cursor:
         cursor.execute(sql)
         return dict(cursor.fetchall())
 
 
-def fetch_topk_all(conn, operator, max_k):
+def fetch_topk_all(conn, operator, max_k, table_name):
     """Retorna, para cada imagem, seus max_k vizinhos mais proximos (exclui a si mesma).
 
     Usa CROSS JOIN LATERAL para calcular tudo em uma unica consulta, aproveitando
     o indice HNSW da coluna embedding.
     """
+    table = assert_safe_table(table_name)
     sql = f"""
     SELECT
         q.id          AS q_id,
@@ -123,11 +144,11 @@ def fetch_topk_all(conn, operator, max_k):
         n.class_name  AS n_class,
         n.file_path   AS n_path,
         n.score       AS score
-    FROM flower_embeddings q
+    FROM {table} q
     CROSS JOIN LATERAL (
         SELECT image_id, class_name, file_path,
                embedding {operator} q.embedding AS score
-        FROM flower_embeddings
+        FROM {table}
         WHERE id <> q.id
         ORDER BY embedding {operator} q.embedding
         LIMIT %s
@@ -293,10 +314,14 @@ def plot_confusion(normalized, classes, output_path, k):
 
 def _load_image_safe(path_str, size=(160, 160)):
     from PIL import Image
+    import io
 
     try:
         if path_str.startswith("s3://"):
-            return None
+            uri = normalize_image_s3_uri(path_str) if is_aws_mode() else path_str
+            data, _ = download_image_bytes(uri)
+            img = Image.open(io.BytesIO(data)).convert("RGB").resize(size)
+            return img
         p = Path(path_str)
         if not p.is_file():
             return None
@@ -430,7 +455,7 @@ def write_report(path, context):
             a(f"![Exemplo de recuperacao]({rel})")
             a("")
     else:
-        a("Sem montagens (imagens locais indisponiveis; execute em modo local com data/processed).")
+        a("Sem montagens (imagens indisponiveis localmente ou em s3://iris-cv-latente-data).")
         a("")
 
     a("## 6. Consolidacao para Resultados e Discussao")
@@ -450,6 +475,8 @@ def write_report(path, context):
 # ==========================================
 def main():
     args = parse_args()
+    dataset = resolve_dataset(args.dataset)
+    table_name = dataset.table_name
     operator = OPERATOR_BY_METRIC[args.metric]
 
     db_config = {
@@ -463,15 +490,19 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"Dataset: {dataset.key} | tabela: {table_name}")
     print("Conectando ao banco...")
     with psycopg2.connect(**db_config) as conn:
-        class_counts = get_class_counts(conn)
+        class_counts = get_class_counts(conn, table_name)
         if not class_counts:
-            raise SystemExit("Tabela flower_embeddings vazia. Rode load_embeddings.py antes.")
+            raise SystemExit(
+                f"Tabela {table_name} vazia. "
+                f"Rode: python load_embeddings.py --dataset {dataset.key}"
+            )
         classes = sorted(class_counts.keys())
 
         print(f"Buscando Top-{args.max_k} vizinhos para todas as imagens...")
-        queries = fetch_topk_all(conn, operator, args.max_k)
+        queries = fetch_topk_all(conn, operator, args.max_k, table_name)
 
     total_queries = len(queries)
     print(f"{total_queries} consultas avaliadas.")
@@ -541,7 +572,13 @@ def main():
         "montages": montages,
     }
 
-    write_report(args.report_path, context)
+    report_path = Path(args.report_path)
+    write_report(report_path, context)
+
+    if is_aws_mode():
+        artifacts = [report_path, pr_curve_path, confusion_path]
+        artifacts.extend(sorted(output_dir.glob("montage_*.png")))
+        upload_report_artifacts(artifacts, dataset_key=dataset.key)
 
     # Resumo no console
     print("\n=== Resumo Precision/Recall ===")
@@ -552,7 +589,7 @@ def main():
             f"P(micro)={m['micro_precision']:.3f} R(micro)={m['micro_recall']:.3f}"
         )
     print(f"\nGraficos em: {output_dir}")
-    print(f"Relatorio em: {args.report_path}")
+    print(f"Relatorio em: {report_path}")
 
 
 if __name__ == "__main__":
