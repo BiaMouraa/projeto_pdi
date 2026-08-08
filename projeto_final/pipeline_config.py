@@ -1,5 +1,6 @@
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -12,14 +13,9 @@ AWS_IMAGE_BUCKET = "iris-cv-latente-data"
 BUCKET_NAME = AWS_IMAGE_BUCKET if PIPELINE_MODE == "aws" else os.getenv(
     "S3_BUCKET", AWS_IMAGE_BUCKET
 )
-S3_PREFIX = os.getenv("S3_PREFIX", "processed").strip("/")
 S3_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-LOCAL_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
-LOCAL_EMBEDDINGS_CSV = PROJECT_ROOT / "data" / "embeddings.csv"
-
-DATASET_URI = "cantonioupao/oxford-flower-17categories-labelled"
 TARGET_SIZE = (256, 256)
 
 DB_CONFIG = {
@@ -29,6 +25,78 @@ DB_CONFIG = {
     "host": os.getenv("PGHOST", "localhost"),
     "port": os.getenv("PGPORT", "5433"),
 }
+
+# Pastas de split comuns no Oxford-102 (PyTorch Challenge).
+SPLIT_DIR_NAMES = frozenset({"train", "valid", "validation", "val", "test"})
+
+
+@dataclass(frozen=True)
+class DatasetSpec:
+    """Configuracao de um dataset do pipeline."""
+
+    key: str
+    slug: str
+    kaggle_uri: str
+    table_name: str
+    description: str
+
+    @property
+    def local_root(self) -> Path:
+        return PROJECT_ROOT / "data" / self.slug
+
+    @property
+    def local_processed_dir(self) -> Path:
+        return self.local_root / "processed"
+
+    @property
+    def local_embeddings_csv(self) -> Path:
+        return self.local_root / "embeddings.csv"
+
+    @property
+    def s3_processed_prefix(self) -> str:
+        return f"{self.slug}/processed"
+
+    @property
+    def s3_embeddings_key(self) -> str:
+        return f"{self.slug}/embeddings/embeddings.csv"
+
+    def embeddings_csv_uri(self, mode=None) -> str:
+        use_aws = (mode == "aws") if mode is not None else is_aws_mode()
+        if use_aws:
+            return f"s3://{image_bucket()}/{self.s3_embeddings_key}"
+        return str(self.local_embeddings_csv)
+
+    def processed_image_key(self, class_name, filename) -> str:
+        return f"{self.s3_processed_prefix}/{class_name}/{filename}"
+
+
+DATASETS = {
+    "oxford17": DatasetSpec(
+        key="oxford17",
+        slug="oxford-flower-17",
+        kaggle_uri="cantonioupao/oxford-flower-17categories-labelled",
+        # Mantem a tabela legada para nao perder embeddings ja carregados.
+        table_name="flower_embeddings",
+        description="Oxford Flower 17 (desenvolvimento)",
+    ),
+    "oxford102": DatasetSpec(
+        key="oxford102",
+        slug="oxford-flower-102",
+        kaggle_uri="nunenuh/pytorch-challange-flower-dataset",
+        table_name="flower_embeddings_oxford102",
+        description="Oxford Flower 102 (PyTorch Challenge)",
+    ),
+}
+
+DATASET_CHOICES = tuple(DATASETS.keys())
+DEFAULT_DATASET_KEY = os.getenv("DATASET", "oxford17").strip().lower()
+ALLOWED_TABLES = frozenset(spec.table_name for spec in DATASETS.values())
+
+# Compatibilidade com imports antigos.
+DATASET_URI = DATASETS["oxford17"].kaggle_uri
+LOCAL_PROCESSED_DIR = DATASETS["oxford17"].local_processed_dir
+LOCAL_EMBEDDINGS_CSV = DATASETS["oxford17"].local_embeddings_csv
+S3_PREFIX = DATASETS["oxford17"].s3_processed_prefix
 
 
 def is_aws_mode():
@@ -40,14 +108,35 @@ def image_bucket():
     return AWS_IMAGE_BUCKET
 
 
-def embeddings_csv_source():
-    if is_aws_mode():
-        return f"s3://{image_bucket()}/embeddings/embeddings.csv"
-    return str(LOCAL_EMBEDDINGS_CSV)
+def resolve_dataset(dataset_key=None) -> DatasetSpec:
+    key = (dataset_key or DEFAULT_DATASET_KEY).strip().lower()
+    if key not in DATASETS:
+        raise ValueError(
+            f"Dataset desconhecido: {key!r}. Opcoes: {', '.join(DATASET_CHOICES)}"
+        )
+    return DATASETS[key]
 
 
-def processed_image_key(class_name, filename):
-    return f"{S3_PREFIX}/{class_name}/{filename}"
+def add_dataset_argument(parser):
+    parser.add_argument(
+        "--dataset",
+        choices=DATASET_CHOICES,
+        default=DEFAULT_DATASET_KEY if DEFAULT_DATASET_KEY in DATASETS else "oxford17",
+        help=(
+            "oxford17: desenvolvimento (17 classes, tabela flower_embeddings). "
+            "oxford102: 102 classes (tabela flower_embeddings_oxford102). "
+            "No S3, artefatos ficam em oxford-flower-17/ ou oxford-flower-102/."
+        ),
+    )
+    return parser
+
+
+def embeddings_csv_source(dataset_key=None, mode=None):
+    return resolve_dataset(dataset_key).embeddings_csv_uri(mode=mode)
+
+
+def processed_image_key(class_name, filename, dataset_key=None):
+    return resolve_dataset(dataset_key).processed_image_key(class_name, filename)
 
 
 def image_s3_uri(key):
@@ -92,7 +181,6 @@ def download_image_bytes(uri_or_key, s3=None):
     raw = str(uri_or_key)
     if raw.startswith("s3://"):
         bucket, key = parse_s3_uri(raw)
-        # Em modo aws, forca o bucket do projeto mesmo se a URI apontar outro.
         if is_aws_mode() or bucket == AWS_IMAGE_BUCKET:
             bucket = image_bucket()
     else:
@@ -111,10 +199,11 @@ def download_image_to_temp(uri_or_key, s3=None):
     return Path(tmp.name)
 
 
-def list_image_keys(prefix=None, s3=None):
+def list_image_keys(prefix=None, s3=None, dataset_key=None):
     """Lista chaves de imagem no bucket oficial sob o prefixo dado."""
     client = s3 or get_s3_client()
-    prefix = (prefix if prefix is not None else f"{S3_PREFIX.rstrip('/')}/")
+    if prefix is None:
+        prefix = f"{resolve_dataset(dataset_key).s3_processed_prefix.rstrip('/')}/"
     keys = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=image_bucket(), Prefix=prefix):

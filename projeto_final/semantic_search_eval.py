@@ -13,11 +13,14 @@ from torchvision import models, transforms
 
 from pipeline_config import DB_CONFIG as DEFAULT_DB_CONFIG
 from pipeline_config import (
+    ALLOWED_TABLES,
     AWS_IMAGE_BUCKET,
+    add_dataset_argument,
     download_image_to_temp,
     is_aws_mode,
     normalize_image_s3_uri,
     parse_s3_uri,
+    resolve_dataset,
 )
 
 OPERATOR_BY_METRIC = {
@@ -41,6 +44,7 @@ def parse_args():
             "com distancia euclidiana (<->) e cosseno (<=>)."
         )
     )
+    add_dataset_argument(parser)
     image_group = parser.add_mutually_exclusive_group(required=False)
     image_group.add_argument(
         "--image",
@@ -51,7 +55,7 @@ def parse_args():
     )
     image_group.add_argument(
         "--image-id",
-        help="image_id cadastrado em flower_embeddings; o script usa file_path do banco.",
+        help="image_id cadastrado na tabela do dataset; o script usa file_path do banco.",
     )
     parser.add_argument(
         "--list-db-samples",
@@ -106,10 +110,17 @@ def load_feature_extractor():
     return model, device
 
 
-def lookup_image_in_db(db_config, image_id):
-    sql = """
+def assert_safe_table(table_name):
+    if table_name not in ALLOWED_TABLES:
+        raise ValueError(f"Tabela nao permitida: {table_name!r}")
+    return table_name
+
+
+def lookup_image_in_db(db_config, image_id, table_name):
+    table = assert_safe_table(table_name)
+    sql = f"""
     SELECT class_name, file_path
-    FROM flower_embeddings
+    FROM {table}
     WHERE image_id = %s
     LIMIT 1;
     """
@@ -118,14 +129,15 @@ def lookup_image_in_db(db_config, image_id):
             cursor.execute(sql, (image_id,))
             row = cursor.fetchone()
     if not row:
-        raise ValueError(f"Nenhum registro encontrado para image_id={image_id!r}.")
+        raise ValueError(f"Nenhum registro encontrado para image_id={image_id!r} em {table}.")
     return row[0], row[1]
 
 
-def list_db_samples(db_config, limit=10):
-    sql = """
+def list_db_samples(db_config, table_name, limit=10):
+    table = assert_safe_table(table_name)
+    sql = f"""
     SELECT image_id, class_name, file_path
-    FROM flower_embeddings
+    FROM {table}
     ORDER BY id
     LIMIT %s;
     """
@@ -217,14 +229,15 @@ def to_vector_literal(embedding):
     return "[" + ",".join(f"{value:.8f}" for value in embedding) + "]"
 
 
-def run_query(conn, vector_literal, operator, top_k):
+def run_query(conn, vector_literal, operator, top_k, table_name):
+    table = assert_safe_table(table_name)
     sql = f"""
     SELECT
         image_id,
         class_name,
         file_path,
         embedding {operator} %s::vector AS score
-    FROM flower_embeddings
+    FROM {table}
     ORDER BY embedding {operator} %s::vector
     LIMIT %s;
     """
@@ -245,7 +258,7 @@ def coherence_at_k(rows, query_class):
     return hits / len(rows)
 
 
-def evaluate_metric(conn, metric, vector_literal, top_ks, runs, query_class):
+def evaluate_metric(conn, metric, vector_literal, top_ks, runs, query_class, table_name):
     operator = OPERATOR_BY_METRIC[metric]
     metric_report = {"metric": metric, "operator": operator, "top_k": {}}
 
@@ -254,7 +267,7 @@ def evaluate_metric(conn, metric, vector_literal, top_ks, runs, query_class):
         sample_rows = []
 
         for run_idx in range(runs):
-            rows, elapsed_ms = run_query(conn, vector_literal, operator, k)
+            rows, elapsed_ms = run_query(conn, vector_literal, operator, k, table_name)
             latencies.append(elapsed_ms)
             if run_idx == 0:
                 sample_rows = rows
@@ -381,6 +394,8 @@ def build_markdown_report(image_path, query_class, runs, reports, selected_metri
 
 def main():
     args = parse_args()
+    dataset = resolve_dataset(args.dataset)
+    table_name = dataset.table_name
 
     db_config = {
         "dbname": args.db_name,
@@ -390,14 +405,20 @@ def main():
         "port": args.db_port,
     }
 
+    print(f"Dataset: {dataset.key} | tabela: {table_name}")
+
     if args.list_db_samples:
-        rows = list_db_samples(db_config)
+        rows = list_db_samples(db_config, table_name)
         if not rows:
-            print("Nenhum registro em flower_embeddings. Rode load_embeddings.py antes.")
+            print(
+                f"Nenhum registro em {table_name}. "
+                f"Rode: python load_embeddings.py --dataset {dataset.key}"
+            )
             return
         print(
-            "Amostras em flower_embeddings "
-            f"(use --image-id; em aws as imagens estao em s3://{AWS_IMAGE_BUCKET}/):"
+            f"Amostras em {table_name} "
+            f"(use --image-id; em aws as imagens estao em "
+            f"s3://{AWS_IMAGE_BUCKET}/{dataset.slug}/):"
         )
         for image_id, class_name, file_path in rows:
             print(f"  {image_id}\t{class_name}\t{file_path}")
@@ -406,7 +427,7 @@ def main():
     if not args.image and not args.image_id:
         raise SystemExit(
             "Informe --image, --image-id ou --list-db-samples. "
-            "Ex.: python semantic_search_eval.py --list-db-samples"
+            f"Ex.: python semantic_search_eval.py --dataset {dataset.key} --list-db-samples"
         )
 
     top_ks = sorted(set(args.top_k))
@@ -420,7 +441,7 @@ def main():
     temp_download = None
 
     if args.image_id:
-        class_from_db, file_ref = lookup_image_in_db(db_config, args.image_id)
+        class_from_db, file_ref = lookup_image_in_db(db_config, args.image_id, table_name)
         query_class = query_class or class_from_db
         image_path, image_label, is_temp = resolve_image_path(
             file_ref, args.local_data_root
@@ -451,6 +472,7 @@ def main():
                 top_ks=top_ks,
                 runs=args.runs,
                 query_class=query_class,
+                table_name=table_name,
             ),
             "cosseno": evaluate_metric(
                 conn=conn,
@@ -459,6 +481,7 @@ def main():
                 top_ks=top_ks,
                 runs=args.runs,
                 query_class=query_class,
+                table_name=table_name,
             ),
         }
 

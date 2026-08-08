@@ -12,15 +12,14 @@ from torchvision import datasets, models, transforms
 from tqdm import tqdm
 
 from pipeline_config import (
-    LOCAL_EMBEDDINGS_CSV,
-    LOCAL_PROCESSED_DIR,
-    S3_PREFIX,
+    add_dataset_argument,
     download_image_bytes,
     get_s3_client,
     image_bucket,
     image_s3_uri,
     is_aws_mode,
     list_image_keys,
+    resolve_dataset,
 )
 
 BATCH_SIZE = 32
@@ -47,7 +46,8 @@ def extract_embeddings_local(processed_dir, output_csv):
     processed_path = processed_dir.resolve()
     if not processed_path.is_dir():
         raise FileNotFoundError(
-            f"Pasta nao encontrada: {processed_path}. Rode: python preprocess.py --mode local"
+            f"Pasta nao encontrada: {processed_path}. "
+            "Rode: python preprocess.py --mode local --dataset ..."
         )
 
     class ImageFolderWithPaths(datasets.ImageFolder):
@@ -85,11 +85,11 @@ def extract_embeddings_local(processed_dir, output_csv):
     print(f"Extracao concluida! CSV em {output_csv.resolve()}")
 
 
-def extract_embeddings_aws():
-    """Le imagens do bucket iris-cv-latente-data e grava CSV no mesmo bucket."""
+def extract_embeddings_aws(dataset_spec):
+    """Le imagens do subdiretorio do dataset no bucket e grava CSV no mesmo slug."""
     s3_client = get_s3_client()
-    prefix = f"{S3_PREFIX.rstrip('/')}/"
-    output_uri = f"s3://{image_bucket()}/embeddings/embeddings.csv"
+    prefix = f"{dataset_spec.s3_processed_prefix.rstrip('/')}/"
+    output_uri = dataset_spec.embeddings_csv_uri(mode="aws")
     bucket = image_bucket()
 
     class S3FlowerDataset(Dataset):
@@ -115,21 +115,21 @@ def extract_embeddings_aws():
             return img, label, os.path.basename(key), image_s3_uri(key)
 
     print(f"Lendo imagens de s3://{bucket}/{prefix}")
-    dataset = S3FlowerDataset(prefix, transform)
-    if len(dataset) == 0:
+    flower_dataset = S3FlowerDataset(prefix, transform)
+    if len(flower_dataset) == 0:
         raise FileNotFoundError(
             f"Nenhuma imagem em s3://{bucket}/{prefix}. "
-            "Rode: python preprocess.py --mode aws"
+            f"Rode: python preprocess.py --mode aws --dataset {dataset_spec.key}"
         )
 
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
-    idx_to_class = {idx: name for name, idx in dataset.class_to_idx.items()}
+    dataloader = DataLoader(flower_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    idx_to_class = {idx: name for name, idx in flower_dataset.class_to_idx.items()}
     model = get_feature_extractor()
     all_embeddings = []
 
     with torch.no_grad():
         for inputs, labels, file_names, uris in tqdm(
-            dataloader, desc=f"Extraindo embeddings (s3://{bucket})"
+            dataloader, desc=f"Extraindo embeddings (s3://{bucket}/{dataset_spec.slug})"
         ):
             inputs = inputs.to(device)
             features = model(inputs).cpu().numpy()
@@ -149,31 +149,37 @@ def extract_embeddings_aws():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Extracao de embeddings MobileNetV2.")
+    add_dataset_argument(parser)
     parser.add_argument(
         "--mode",
         choices=("local", "aws"),
         default="local" if not is_aws_mode() else "aws",
         help=(
-            "local: data/processed -> data/embeddings.csv | "
-            "aws: iris-cv-latente-data -> S3."
+            "local: data/<slug>/processed -> data/<slug>/embeddings.csv | "
+            "aws: s3://.../<slug>/processed -> s3://.../<slug>/embeddings/."
         ),
     )
     parser.add_argument(
         "--processed-dir",
-        default=str(LOCAL_PROCESSED_DIR),
-        help="Entrada local (modo local).",
+        default=None,
+        help="Entrada local (padrao: data/<slug>/processed).",
     )
     parser.add_argument(
         "--output-csv",
-        default=str(LOCAL_EMBEDDINGS_CSV),
-        help="Saida CSV (modo local).",
+        default=None,
+        help="Saida CSV local (padrao: data/<slug>/embeddings.csv).",
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    dataset_spec = resolve_dataset(args.dataset)
+    print(f"Dataset: {dataset_spec.key} ({dataset_spec.description})")
+
     if args.mode == "local":
-        extract_embeddings_local(Path(args.processed_dir), Path(args.output_csv))
+        processed_dir = Path(args.processed_dir or dataset_spec.local_processed_dir)
+        output_csv = Path(args.output_csv or dataset_spec.local_embeddings_csv)
+        extract_embeddings_local(processed_dir, output_csv)
     else:
-        extract_embeddings_aws()
+        extract_embeddings_aws(dataset_spec)
