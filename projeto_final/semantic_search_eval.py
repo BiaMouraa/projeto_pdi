@@ -21,6 +21,7 @@ from pipeline_config import (
     normalize_image_s3_uri,
     parse_s3_uri,
     resolve_dataset,
+    upload_report_artifacts,
 )
 
 OPERATOR_BY_METRIC = {
@@ -506,6 +507,9 @@ def main():
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report_md, encoding="utf-8")
     print(f"Relatorio salvo em: {report_path}")
+
+    if is_aws_mode():
+        upload_report_artifacts([report_path], dataset_key=dataset.key)
 
     if temp_download is not None:
         temp_download.unlink(missing_ok=True)

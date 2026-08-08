@@ -60,6 +60,10 @@ class DatasetSpec:
     def s3_embeddings_key(self) -> str:
         return f"{self.slug}/embeddings/embeddings.csv"
 
+    @property
+    def s3_reports_prefix(self) -> str:
+        return f"{self.slug}/reports"
+
     def embeddings_csv_uri(self, mode=None) -> str:
         use_aws = (mode == "aws") if mode is not None else is_aws_mode()
         if use_aws:
@@ -212,3 +216,67 @@ def list_image_keys(prefix=None, s3=None, dataset_key=None):
             if key.lower().endswith((".jpg", ".jpeg", ".png")):
                 keys.append(key)
     return keys
+
+
+def guess_content_type(path):
+    return {
+        ".md": "text/markdown; charset=utf-8",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".csv": "text/csv",
+        ".txt": "text/plain; charset=utf-8",
+    }.get(Path(path).suffix.lower(), "application/octet-stream")
+
+
+def upload_artifact(local_path, s3_key, s3=None):
+    """Envia um arquivo local (relatorio/grafico) para o bucket."""
+    local_path = Path(local_path)
+    if not local_path.is_file():
+        raise FileNotFoundError(f"Arquivo para upload nao encontrado: {local_path}")
+
+    client = s3 or get_s3_client()
+    key = str(s3_key).lstrip("/")
+    client.put_object(
+        Bucket=image_bucket(),
+        Key=key,
+        Body=local_path.read_bytes(),
+        ContentType=guess_content_type(local_path),
+    )
+    uri = image_s3_uri(key)
+    print(f"Artefato enviado: {uri}")
+    return uri
+
+
+def upload_report_artifacts(paths, dataset_key=None, s3=None):
+    """Envia relatorios/graficos para s3://bucket/<slug>/reports/...
+
+    Em modo local nao faz nada. Preserva o caminho relativo a docs/ quando possivel.
+    """
+    if not is_aws_mode():
+        return []
+
+    dataset = resolve_dataset(dataset_key)
+    prefix = dataset.s3_reports_prefix
+    docs_root = (PROJECT_ROOT / "docs").resolve()
+    client = s3 or get_s3_client()
+    uploaded = []
+
+    for path in paths:
+        path = Path(path)
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        try:
+            rel = resolved.relative_to(docs_root).as_posix()
+        except ValueError:
+            rel = path.name
+        s3_key = f"{prefix}/{rel}"
+        uploaded.append(upload_artifact(resolved, s3_key, s3=client))
+
+    if uploaded:
+        print(
+            f"{len(uploaded)} artefato(s) em "
+            f"s3://{image_bucket()}/{prefix}/"
+        )
+    return uploaded

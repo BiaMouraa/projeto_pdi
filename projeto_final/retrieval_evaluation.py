@@ -35,6 +35,7 @@ from pipeline_config import (
     is_aws_mode,
     normalize_image_s3_uri,
     resolve_dataset,
+    upload_report_artifacts,
 )
 
 OPERATOR_BY_METRIC = {
@@ -571,7 +572,13 @@ def main():
         "montages": montages,
     }
 
-    write_report(args.report_path, context)
+    report_path = Path(args.report_path)
+    write_report(report_path, context)
+
+    if is_aws_mode():
+        artifacts = [report_path, pr_curve_path, confusion_path]
+        artifacts.extend(sorted(output_dir.glob("montage_*.png")))
+        upload_report_artifacts(artifacts, dataset_key=dataset.key)
 
     # Resumo no console
     print("\n=== Resumo Precision/Recall ===")
@@ -582,7 +589,7 @@ def main():
             f"P(micro)={m['micro_precision']:.3f} R(micro)={m['micro_recall']:.3f}"
         )
     print(f"\nGraficos em: {output_dir}")
-    print(f"Relatorio em: {args.report_path}")
+    print(f"Relatorio em: {report_path}")
 
 
 if __name__ == "__main__":
