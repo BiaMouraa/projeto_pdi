@@ -12,5 +12,12 @@ torchvision
 pandas
 tqdm
 
+# Avaliação e Gráficos de Desempenho (Issue 5)
+matplotlib
+
 # Ingestão de Dados no Postgres
 psycopg2-binary
+
+# Infraestrutura e Armazenamento em Nuvem
+boto3
+s3fs

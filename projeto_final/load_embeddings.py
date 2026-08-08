@@ -1,31 +1,16 @@
+import argparse
+from pathlib import Path
+
 import pandas as pd
 import psycopg2
 from tqdm import tqdm
 
-# ==========================================
-# 1. Configurações de Conexão (Baseado no Docker)
-# ==========================================
-DB_CONFIG = {
-    "dbname": "iris_latente",
-    "user": "admin",
-    "password": "adminpassword",
-    "host": "localhost",
-    "port": "5432"
-}
+from pipeline_config import DB_CONFIG, LOCAL_EMBEDDINGS_CSV, embeddings_csv_source, is_aws_mode
 
-CSV_FILE = "data/embeddings.csv"
-
-# ==========================================
-# 2. Queries SQL
-# ==========================================
 SQL_SETUP = """
--- Habilita a extensão
 CREATE EXTENSION IF NOT EXISTS vector;
-
--- Remove a tabela se existir (para facilitar testes locais)
 DROP TABLE IF EXISTS flower_embeddings;
 
--- Criação da tabela. A MobileNetV2 gera vetores de tamanho 1280.
 CREATE TABLE flower_embeddings (
     id SERIAL PRIMARY KEY,
     image_id VARCHAR(255),
@@ -35,58 +20,96 @@ CREATE TABLE flower_embeddings (
 );
 """
 
-# HNSW é o índice mais rápido atualmente para busca aproximada no pgvector
-SQL_INDEX = """
-CREATE INDEX ON flower_embeddings 
-USING hnsw (embedding vector_cosine_ops);
-"""
+SQL_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS flower_embeddings_embedding_cosine_idx ON flower_embeddings USING hnsw (embedding vector_cosine_ops);",
+    "CREATE INDEX IF NOT EXISTS flower_embeddings_embedding_l2_idx ON flower_embeddings USING hnsw (embedding vector_l2_ops);",
+]
+SQL_INSERT = (
+    "INSERT INTO flower_embeddings (image_id, class_name, file_path, embedding) "
+    "VALUES (%s, %s, %s, %s)"
+)
 
-SQL_INSERT = """
-INSERT INTO flower_embeddings (image_id, class_name, file_path, embedding)
-VALUES (%s, %s, %s, %s)
-"""
 
-def carregar_dados_no_banco():
-    print("Conectando ao PostgreSQL via Docker...")
+def read_embeddings_csv(csv_path):
+    path = Path(csv_path)
+    if path.is_file():
+        print(f"Lendo CSV local: {path.resolve()}")
+        return pd.read_csv(path)
+
+    if str(csv_path).startswith("s3://"):
+        print(f"Lendo CSV do S3: {csv_path}")
+        return pd.read_csv(csv_path)
+
+    raise FileNotFoundError(
+        f"CSV nao encontrado: {csv_path}. "
+        "Rode extractor.py --mode local ou informe --csv."
+    )
+
+
+def carregar_dados_no_banco(csv_path):
+    df = read_embeddings_csv(csv_path)
+
+    print("Conectando ao PostgreSQL...")
     conn = psycopg2.connect(**DB_CONFIG)
     cursor = conn.cursor()
 
     try:
-        # 1. Setup da extensão e tabela
-        print("Configurando extensão e modelando tabela...")
+        print("Configurando esquema e tabela...")
         cursor.execute(SQL_SETUP)
-        conn.commit()
 
-        # 2. Leitura dos dados extraídos
-        print(f"Lendo dados do arquivo {CSV_FILE}...")
-        df = pd.read_csv(CSV_FILE)
-        
-        # 3. Inserção iterativa
-        print("Iniciando ingestão de dados...")
+        print("Iniciando ingestao de registros no BD...")
         for _, row in tqdm(df.iterrows(), total=len(df)):
-            cursor.execute(SQL_INSERT, (
-                row['image_id'],
-                row['class_name'],
-                row['file_path'],
-                row['embedding']
-            ))
-        
-        conn.commit()
-        print("Dados ingeridos com sucesso!")
+            cursor.execute(
+                SQL_INSERT,
+                (
+                    row["image_id"],
+                    row["class_name"],
+                    row["file_path"],
+                    row["embedding"],
+                ),
+            )
 
-        # 4. Criação do Índice
-        print("Construindo índice HNSW para otimização de busca (Isso pode levar alguns segundos)...")
-        cursor.execute(SQL_INDEX)
         conn.commit()
-        print("Índice criado com sucesso!")
+        print("Processo de insercao finalizado!")
 
-    except Exception as e:
-        print(f"Ocorreu um erro no banco de dados: {e}")
+        print("Construindo indices vetoriais HNSW...")
+        for sql_index in SQL_INDEXES:
+            cursor.execute(sql_index)
+        conn.commit()
+        print("Infraestrutura pronta (cosseno + euclidiana).")
+
+    except Exception as exc:
+        print(f"ROLLBACK. Erro na ingestao: {exc}")
         conn.rollback()
+        raise
     finally:
         cursor.close()
         conn.close()
-        print("Conexão encerrada.")
+
+
+def parse_args():
+    default_csv = embeddings_csv_source()
+    parser = argparse.ArgumentParser(description="Ingestao de embeddings no PostgreSQL.")
+    parser.add_argument(
+        "--csv",
+        default=default_csv,
+        help=f"CSV de embeddings (padrao: {default_csv}).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("local", "aws"),
+        default="local" if not is_aws_mode() else "aws",
+        help="Atalho para escolher origem padrao do CSV.",
+    )
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    carregar_dados_no_banco()
+    args = parse_args()
+    csv_path = args.csv
+    if args.mode == "local" and args.csv == embeddings_csv_source():
+        csv_path = str(LOCAL_EMBEDDINGS_CSV)
+    elif args.mode == "aws" and args.csv == embeddings_csv_source():
+        csv_path = embeddings_csv_source()
+
+    carregar_dados_no_banco(csv_path)
